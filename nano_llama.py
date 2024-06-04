@@ -298,9 +298,7 @@ class NanoLlamaForCasualLM(nn.Module):
             cfg.max_position_embeddings * 2,
             cfg.rope_theta,
         )
-        print(f'self freqs_cis.device: {self.freqs_cis.device}')
         self.freqs_cis.to(self.device)
-        print(f'self freqs_cis.device: {self.freqs_cis.device}')
 
     def forward(
         self, 
