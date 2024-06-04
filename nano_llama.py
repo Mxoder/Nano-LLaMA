@@ -161,9 +161,7 @@ class NanoLlamaAttention(nn.Module):
         bsz, seq_len, _ = input_tensor.shape
 
         # QKV 投影
-        query = self.q_proj(input_tensor)
-        key = self.k_proj(input_tensor)
-        value = self.v_proj(input_tensor)
+        query, key, value = self.q_proj(input_tensor), self.k_proj(input_tensor), self.v_proj(input_tensor)
 
         # 重排张量形状
         query = rearrange(query, 'b s (h d) -> b s h d', h=self.num_attention_heads)
