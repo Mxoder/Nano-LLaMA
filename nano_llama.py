@@ -421,14 +421,14 @@ class NanoLlamaForCasualLM(nn.Module):
             elif any(s in name for s in ["proj", "embed", "lm_head"]):
                 nn.init.normal_(param, mean=0.0, std=0.02)
 
-    def print_model_parameters(model, verbose=True):
+    def print_model_parameters(self, verbose=True):
         """
         打印模型的每一层及其参数大小
         """
         print("Layer Name & Parameters")
         print("----------------------------")
         total_params = 0
-        for name, parameter in model.named_parameters():
+        for name, parameter in self.named_parameters():
             param_size = parameter.size()
             param_count = torch.prod(torch.tensor(param_size)).item()
             total_params += param_count
