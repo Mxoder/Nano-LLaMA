@@ -1,2 +1,2 @@
 # Nano-LLaMA
-Nano LLama, from sratch, by pytorch
+Nano LLama, implementation from sratch, by pytorch
