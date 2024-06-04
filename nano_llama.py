@@ -3,12 +3,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from loguru import logger
 from typing import Optional, Tuple
 from torch.nn import CrossEntropyLoss
 
-from .nano_tokenizer import NanoTokenizer
-from .nano_llama_config import NanoLlamaConfig
+from nano_tokenizer import NanoTokenizer
+from nano_llama_config import NanoLlamaConfig
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
