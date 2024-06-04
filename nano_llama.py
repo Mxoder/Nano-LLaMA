@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from einops import rearrange
 from typing import Optional, Tuple
 from torch.nn import CrossEntropyLoss
 
@@ -144,6 +145,7 @@ class NanoLlamaAttention(nn.Module):
         self,
         input_tensor: torch.Tensor,
         freqs_cis: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         前向传播方法。
@@ -151,6 +153,7 @@ class NanoLlamaAttention(nn.Module):
         参数:
             input_tensor (torch.Tensor): 输入张量，形状为 (bsz, seq_len, hidden_size)。
             freqs_cis (torch.Tensor): 频率的复数表示张量。
+            padding_mask (Optional[torch.Tensor]): 用于屏蔽pad位置的掩码，形状为 (bsz, seq_len)。
 
         返回:
             torch.Tensor: 输出张量。
@@ -158,32 +161,42 @@ class NanoLlamaAttention(nn.Module):
         bsz, seq_len, _ = input_tensor.shape
 
         # QKV 投影
-        query, key, value = self.q_proj(input_tensor), self.k_proj(input_tensor), self.v_proj(input_tensor)
-        query = query.view(bsz, seq_len, self.num_attention_heads, self.head_dim)
-        key = key.view(bsz, seq_len, self.num_attention_heads, self.head_dim)
-        value = value.view(bsz, seq_len, self.num_attention_heads, self.head_dim)
+        query = self.q_proj(input_tensor)
+        key = self.k_proj(input_tensor)
+        value = self.v_proj(input_tensor)
+
+        # 重排张量形状
+        query = rearrange(query, 'b s (h d) -> b s h d', h=self.num_attention_heads)
+        key = rearrange(key, 'b s (h d) -> b s h d', h=self.num_attention_heads)
+        value = rearrange(value, 'b s (h d) -> b s h d', h=self.num_attention_heads)
 
         # 应用旋转嵌入 (RoPE) 相对位置嵌入
         query, key = apply_rotary_emb(query, key, freqs_cis)
 
         # 将 heads 转换为 batch 维度
-        query = query.transpose(1, 2)  # (bsz, n_heads, seq_len, head_dim)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
+        query = rearrange(query, 'b s h d -> b h s d')
+        key = rearrange(key, 'b s h d -> b h s d')
+        value = rearrange(value, 'b s h d -> b h s d')
 
-        # 缩放点积注意力
-        attention_output = F.scaled_dot_product_attention(
-            query, key, value,
-            attn_mask=None,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=True
-        )
+        scores = torch.matmul(query, rearrange(key, 'b h s d -> b h d s')) / math.sqrt(self.head_dim)
+
+        # 应用padding_mask
+        if padding_mask is not None:
+            pad_mask = torch.full((bsz, seq_len), -10000.0).to(device)
+            pad_mask.masked_fill_(padding_mask.to(torch.bool), 0.0)
+
+            scores = scores + rearrange(pad_mask, "b s -> b 1 1 s")
+
+        scores = scores + self.casual_mask[:, :, :seq_len, :seq_len]
+        scores = F.softmax(scores.float(), dim=-1).type_as(query)
+        attention_output = torch.matmul(scores, value)  # (bs, n_local_heads, seqlen, head_dim)
 
         # 恢复时间维度为 batch 维度并连接 heads
-        attention_output = attention_output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+        attention_output = rearrange(attention_output, 'b h s d -> b s (h d)')
 
         # 最终投影到残差流中
         output = self.o_proj(attention_output)
+
         return output
 
 class NanoLlamaMLP(nn.Module):
@@ -245,14 +258,15 @@ class NanoLlamaDecoderLayer(nn.Module):
         self,
         input_tensor: torch.Tensor,
         freqs_cis: torch.Tensor,
+        padding_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """
         前向传播方法。
 
         参数:
             input_tensor (torch.Tensor): 输入张量，形状为 (bsz, seq_len, hidden_size)。
-            freqs_cos (torch.Tensor): 余弦频率张量。
-            freqs_sin (torch.Tensor): 正弦频率张量。
+            freqs_cis (torch.Tensor): 频率张量（包含正余弦）。
+            padding_mask (Optional[torch.Tensor]): 填充掩码，形状为 (bsz, seq_len)
 
         返回:
             torch.Tensor: 输出张量。
@@ -260,7 +274,7 @@ class NanoLlamaDecoderLayer(nn.Module):
         # 输入层归一化
         normed_input = self.input_layernorm(input_tensor)
         # 注意力层前向传播
-        attention_output = self.attention(normed_input, freqs_cis)
+        attention_output = self.attention(normed_input, freqs_cis, padding_mask)
         # 残差连接
         residual_connection1 = input_tensor + attention_output
 
@@ -302,7 +316,8 @@ class NanoLlamaForCasualLM(nn.Module):
 
     def forward(
         self, 
-        input_ids: torch.LongTensor, 
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None
     ) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
         """
@@ -310,6 +325,7 @@ class NanoLlamaForCasualLM(nn.Module):
 
         参数:
             input_ids (torch.LongTensor): 输入张量，形状为 (bsz, seq_len)。
+            attention_mask (Optional[torch.LongTensor]): 注意力掩码（for padding），形状为 (bsz, seq_len)
             labels (Optional[torch.LongTensor]): 标签张量，形状为 (bsz, seq_len)。
 
         返回:
@@ -321,7 +337,7 @@ class NanoLlamaForCasualLM(nn.Module):
 
         hidden_states = embedded_input
         for layer in self.layers:
-            hidden_states = layer(hidden_states, freqs_cis)
+            hidden_states = layer(hidden_states, freqs_cis, padding_mask=attention_mask)
         outputs = self.norm(hidden_states)
         
         logits = self.lm_head(outputs)
